@@ -24,21 +24,7 @@ create table if not exists workspace_members (
   primary key (workspace_id, user_id)
 );
 
-create table if not exists tasks (
-  id uuid primary key default gen_random_uuid(),
-  workspace_id uuid not null references workspaces(id) on delete cascade,
-  title varchar(200) not null,
-  description text,
-  status varchar(30) not null default 'OPEN',
-  priority varchar(30) not null default 'MEDIUM',
-  assignee_user_id uuid references users(id) on delete set null,
-  created_by_user_id uuid not null references users(id) on delete restrict,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-
-create index if not exists idx_tasks_workspace on tasks(workspace_id);
-create index if not exists idx_tasks_assignee on tasks(assignee_user_id);
+/* tasks moved to V4__create_tasks.sql */
 
 create table if not exists comments (
   id uuid primary key default gen_random_uuid(),

@@ -1,61 +1,80 @@
 package com.teamops.api.security;
 
-import org.springframework.context.annotation.*;
+import jakarta.servlet.DispatcherType;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.security.authentication.*;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
-import org.springframework.security.crypto.bcrypt.*;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.security.web.*;
-import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
-import org.springframework.http.HttpStatus;
+import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
-import jakarta.servlet.DispatcherType;
-
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
 @Configuration
 @EnableConfigurationProperties(JwtProperties.class)
 public class SecurityConfig {
 
   private final JwtAuthFilter jwtAuthFilter;
+  private final UserDetailsService userDetailsService;
 
-  public SecurityConfig(JwtAuthFilter jwtAuthFilter) {
+  public SecurityConfig(JwtAuthFilter jwtAuthFilter, UserDetailsService userDetailsService) {
     this.jwtAuthFilter = jwtAuthFilter;
+    this.userDetailsService = userDetailsService;
   }
 
-@Bean
-public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+  @Bean
+  public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
     return http
         .csrf(csrf -> csrf.disable())
         .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
         .exceptionHandling(eh -> eh
-          .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)) // 401
-          .accessDeniedHandler((req, res, ex) -> {
-            res.setStatus(HttpStatus.FORBIDDEN.value()); // 403 (no /error dispatch)
-          })
-      )
-      
-      .authorizeHttpRequests(auth -> auth
-        .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
-        .requestMatchers("/error").permitAll()
-        .requestMatchers("/auth/**").permitAll()
-        .requestMatchers("/actuator/health", "/actuator/info").permitAll()
-        .requestMatchers("/api/admin/**").hasRole("ADMIN")
-        .anyRequest().authenticated()
-    )
+            .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
+            .accessDeniedHandler((req, res, ex) -> res.setStatus(HttpStatus.FORBIDDEN.value()))
+        )
+        .authenticationProvider(daoAuthProvider())
+        .authorizeHttpRequests(auth -> auth
+            .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
+            .requestMatchers("/error").permitAll()
+
+            // ✅ allow auth endpoints (yours is /api/auth/login)
+            .requestMatchers("/api/auth/**").permitAll()
+            .requestMatchers("/auth/**").permitAll()
+
+            .requestMatchers("/actuator/health", "/actuator/info").permitAll()
+
+            // Admin-only deletes for projects
+            .requestMatchers(HttpMethod.DELETE, "/api/projects/**").hasRole("ADMIN")
+
+            // Admin area
+            .requestMatchers("/api/admin/**").hasRole("ADMIN")
+
+            .anyRequest().authenticated()
+        )
         .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
         .build();
   }
-  
 
+  @Bean
+  public DaoAuthenticationProvider daoAuthProvider() {
+    DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
+    provider.setUserDetailsService(userDetailsService);
+    provider.setPasswordEncoder(passwordEncoder());
+    return provider;
+  }
 
   @Bean
   public FilterRegistrationBean<JwtAuthFilter> jwtAuthFilterRegistration(JwtAuthFilter filter) {
     FilterRegistrationBean<JwtAuthFilter> reg = new FilterRegistrationBean<>(filter);
-    reg.setEnabled(false); // only run inside Spring Security chain
+    reg.setEnabled(false);
     return reg;
   }
 
