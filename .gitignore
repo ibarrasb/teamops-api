@@ -34,3 +34,5 @@ out/
 # ====== Optional: local-only Spring config ======
 # If you ever put real secrets in application-local.yml, uncomment:
 # src/main/resources/application-local.yml
+# Maven / Java build output
+target/
