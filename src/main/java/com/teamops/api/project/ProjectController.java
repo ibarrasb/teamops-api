@@ -5,10 +5,10 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 import java.util.UUID;
@@ -23,57 +23,106 @@ public class ProjectController {
     this.projects = projects;
   }
 
-  private static boolean isAdmin(UserDetails user) {
-    for (GrantedAuthority a : user.getAuthorities()) {
-      if ("ROLE_ADMIN".equals(a.getAuthority())) return true;
-    }
-    return false;
+  @GetMapping
+  public ResponseEntity<List<ProjectResponse>> list(@AuthenticationPrincipal UserDetails user) {
+    List<ProjectResponse> out = projects
+        .findAllByOwnerEmailOrderByCreatedAtDesc(user.getUsername())
+        .stream()
+        .map(ProjectResponse::from)
+        .toList();
+
+    return ResponseEntity.ok(out);
   }
 
-  @GetMapping
-  public List<Project> list(@AuthenticationPrincipal UserDetails user) {
-    // keep it simple: users see only their projects (admins can still see only theirs for now)
-    return projects.findAllByOwnerEmailOrderByCreatedAtDesc(user.getUsername());
+  @GetMapping("/{projectId}")
+  public ResponseEntity<ProjectResponse> getOne(
+      @AuthenticationPrincipal UserDetails user,
+      @PathVariable UUID projectId
+  ) {
+    Project p = projects.findByIdAndOwnerEmail(projectId, user.getUsername())
+        .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+
+    return ResponseEntity.ok(ProjectResponse.from(p));
   }
 
   @PostMapping
-  public ResponseEntity<Project> create(
+  public ResponseEntity<ProjectResponse> create(
       @AuthenticationPrincipal UserDetails user,
       @Valid @RequestBody CreateProjectRequest req
   ) {
     Project p = Project.builder()
-        .name(req.getName())
+        .name(req.getName().trim())
         .description(req.getDescription())
         .ownerEmail(user.getUsername())
         .build();
 
     Project saved = projects.save(p);
-    return ResponseEntity.status(HttpStatus.CREATED).body(saved);
+    return ResponseEntity.status(HttpStatus.CREATED).body(ProjectResponse.from(saved));
   }
 
-  @GetMapping("/{id}")
-  public ResponseEntity<Project> getById(
+  @PatchMapping("/{projectId}")
+  public ResponseEntity<ProjectResponse> update(
       @AuthenticationPrincipal UserDetails user,
-      @PathVariable UUID id
+      @PathVariable UUID projectId,
+      @RequestBody UpdateProjectRequest req
   ) {
-    return projects.findByIdAndOwnerEmail(id, user.getUsername())
-        .map(ResponseEntity::ok)
-        .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND).build());
+    Project p = projects.findByIdAndOwnerEmail(projectId, user.getUsername())
+        .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+
+    boolean changed = false;
+
+    if (req.getName() != null) {
+      String name = req.getName().trim();
+      if (name.isEmpty()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "name cannot be blank");
+      if (name.length() < 2 || name.length() > 160) {
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "name must be 2-160 characters");
+      }
+      p.setName(name);
+      changed = true;
+    }
+
+    if (req.getDescription() != null) {
+      p.setDescription(req.getDescription());
+      changed = true;
+    }
+
+    if (!changed) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No updatable fields provided");
+    }
+
+    Project saved = projects.save(p);
+    return ResponseEntity.ok(ProjectResponse.from(saved));
   }
 
-  // DELETE will be ADMIN-only via SecurityConfig change below
-  @DeleteMapping("/{id}")
-  public ResponseEntity<Void> delete(@PathVariable UUID id) {
-    if (!projects.existsById(id)) return ResponseEntity.notFound().build();
-    projects.deleteById(id);
+  @DeleteMapping("/{projectId}")
+  public ResponseEntity<Void> delete(
+      @AuthenticationPrincipal UserDetails user,
+      @PathVariable UUID projectId
+  ) {
+    Project p = projects.findByIdAndOwnerEmail(projectId, user.getUsername())
+        .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+
+    projects.delete(p);
     return ResponseEntity.noContent().build();
   }
 
   public static class CreateProjectRequest {
-    @NotBlank @Size(min = 2, max = 120)
+    @NotBlank
+    @Size(min = 2, max = 160)
     private String name;
 
-    @Size(max = 500)
+    @Size(max = 1000)
+    private String description;
+
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
+  }
+
+  public static class UpdateProjectRequest {
+    private String name;
     private String description;
 
     public String getName() { return name; }

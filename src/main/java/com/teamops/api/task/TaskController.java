@@ -10,6 +10,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -29,37 +30,122 @@ public class TaskController {
   }
 
   @GetMapping
-  public ResponseEntity<List<Task>> list(
+  public ResponseEntity<List<TaskResponse>> list(
       @AuthenticationPrincipal UserDetails user,
       @PathVariable UUID projectId
   ) {
-    Optional<Project> project = projects.findByIdAndOwnerEmail(projectId, user.getUsername());
-    if (project.isEmpty()) return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+    requireOwnedProject(projectId, user.getUsername());
 
-    return ResponseEntity.ok(
-        tasks.findAllByOwnerEmailAndProject_IdOrderByCreatedAtDesc(user.getUsername(), projectId)
-    );
+    List<TaskResponse> out = tasks
+        .findAllByOwnerEmailAndProjectIdOrderByCreatedAtDesc(user.getUsername(), projectId)
+        .stream()
+        .map(TaskResponse::from)
+        .toList();
+
+    return ResponseEntity.ok(out);
+  }
+
+  @GetMapping("/{taskId}")
+  public ResponseEntity<TaskResponse> getOne(
+      @AuthenticationPrincipal UserDetails user,
+      @PathVariable UUID projectId,
+      @PathVariable UUID taskId
+  ) {
+    requireOwnedProject(projectId, user.getUsername());
+
+    Task task = tasks.findByIdAndOwnerEmailAndProjectId(taskId, user.getUsername(), projectId)
+        .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+
+    return ResponseEntity.ok(TaskResponse.from(task));
   }
 
   @PostMapping
-  public ResponseEntity<Task> create(
+  public ResponseEntity<TaskResponse> create(
       @AuthenticationPrincipal UserDetails user,
       @PathVariable UUID projectId,
       @Valid @RequestBody CreateTaskRequest req
   ) {
-    Optional<Project> project = projects.findByIdAndOwnerEmail(projectId, user.getUsername());
-    if (project.isEmpty()) return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+    requireOwnedProject(projectId, user.getUsername());
+
+    String status = TaskStatus.defaultIfBlank(req.getStatus());
 
     Task t = Task.builder()
-        .project(project.get())
-        .title(req.getTitle())
-        .status(req.getStatus() == null ? "TODO" : req.getStatus())
+        .projectId(projectId)
+        .title(req.getTitle().trim())
+        .status(status)
         .dueAt(req.getDueAt())
         .ownerEmail(user.getUsername())
         .build();
 
     Task saved = tasks.save(t);
-    return ResponseEntity.status(HttpStatus.CREATED).body(saved);
+    return ResponseEntity.status(HttpStatus.CREATED).body(TaskResponse.from(saved));
+  }
+
+  @PatchMapping("/{taskId}")
+  public ResponseEntity<TaskResponse> update(
+      @AuthenticationPrincipal UserDetails user,
+      @PathVariable UUID projectId,
+      @PathVariable UUID taskId,
+      @RequestBody UpdateTaskRequest req
+  ) {
+    requireOwnedProject(projectId, user.getUsername());
+
+    Task task = tasks.findByIdAndOwnerEmailAndProjectId(taskId, user.getUsername(), projectId)
+        .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+
+    boolean changed = false;
+
+    if (req.getTitle() != null) {
+      String title = req.getTitle().trim();
+      if (title.isEmpty()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "title cannot be blank");
+      if (title.length() < 2 || title.length() > 200) {
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "title must be 2-200 characters");
+      }
+      task.setTitle(title);
+      changed = true;
+    }
+
+    if (req.getStatus() != null) {
+      try {
+        task.setStatus(TaskStatus.normalizeOrThrow(req.getStatus()));
+      } catch (IllegalArgumentException e) {
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
+      }
+      changed = true;
+    }
+
+    if (req.getDueAt() != null) {
+      task.setDueAt(req.getDueAt());
+      changed = true;
+    }
+
+    if (!changed) {
+      throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No updatable fields provided");
+    }
+
+    Task saved = tasks.save(task);
+    return ResponseEntity.ok(TaskResponse.from(saved));
+  }
+
+  @DeleteMapping("/{taskId}")
+  public ResponseEntity<Void> delete(
+      @AuthenticationPrincipal UserDetails user,
+      @PathVariable UUID projectId,
+      @PathVariable UUID taskId
+  ) {
+    requireOwnedProject(projectId, user.getUsername());
+
+    Task task = tasks.findByIdAndOwnerEmailAndProjectId(taskId, user.getUsername(), projectId)
+        .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+
+    tasks.delete(task);
+    return ResponseEntity.noContent().build();
+  }
+
+  private Project requireOwnedProject(UUID projectId, String ownerEmail) {
+    Optional<Project> project = projects.findByIdAndOwnerEmail(projectId, ownerEmail);
+    if (project.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND);
+    return project.get();
   }
 
   public static class CreateTaskRequest {
@@ -70,6 +156,21 @@ public class TaskController {
     @Size(max = 30)
     private String status;
 
+    private OffsetDateTime dueAt;
+
+    public String getTitle() { return title; }
+    public void setTitle(String title) { this.title = title; }
+
+    public String getStatus() { return status; }
+    public void setStatus(String status) { this.status = status; }
+
+    public OffsetDateTime getDueAt() { return dueAt; }
+    public void setDueAt(OffsetDateTime dueAt) { this.dueAt = dueAt; }
+  }
+
+  public static class UpdateTaskRequest {
+    private String title;
+    private String status;
     private OffsetDateTime dueAt;
 
     public String getTitle() { return title; }

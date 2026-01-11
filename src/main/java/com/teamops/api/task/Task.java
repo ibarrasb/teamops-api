@@ -1,8 +1,5 @@
 package com.teamops.api.task;
 
-import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.teamops.api.project.Project;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
@@ -21,26 +18,17 @@ import java.util.UUID;
 public class Task {
 
   @Id
-  @GeneratedValue
+  @GeneratedValue(strategy = GenerationType.UUID)
   private UUID id;
 
-  // Keep this LAZY, but don't serialize it (prevents "no session" errors)
-  @JsonIgnore
-  @ManyToOne(fetch = FetchType.LAZY, optional = false)
-  @JoinColumn(name = "project_id", nullable = false)
-  private Project project;
-
-  // Expose projectId to the client
-  @JsonProperty("projectId")
-  public UUID getProjectId() {
-    return project != null ? project.getId() : null;
-  }
+  @Column(name = "project_id", nullable = false)
+  private UUID projectId;
 
   @Column(nullable = false)
   private String title;
 
   @Column(nullable = false)
-  private String status; // TODO, IN_PROGRESS, DONE
+  private String status; // TODO, IN_PROGRESS, DONE (string for now)
 
   @Column(name = "due_at")
   private OffsetDateTime dueAt;

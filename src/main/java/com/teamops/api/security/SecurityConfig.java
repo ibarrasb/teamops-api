@@ -52,7 +52,8 @@ public class SecurityConfig {
             .requestMatchers("/actuator/health", "/actuator/info").permitAll()
 
             // Admin-only deletes for projects
-            .requestMatchers(HttpMethod.DELETE, "/api/projects/**").hasRole("ADMIN")
+            .requestMatchers(HttpMethod.DELETE, "/api/projects/**").authenticated()
+
 
             // Admin area
             .requestMatchers("/api/admin/**").hasRole("ADMIN")

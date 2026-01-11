@@ -7,6 +7,8 @@ import java.util.Optional;
 import java.util.UUID;
 
 public interface ProjectRepository extends JpaRepository<Project, UUID> {
+
   List<Project> findAllByOwnerEmailOrderByCreatedAtDesc(String ownerEmail);
+
   Optional<Project> findByIdAndOwnerEmail(UUID id, String ownerEmail);
 }
