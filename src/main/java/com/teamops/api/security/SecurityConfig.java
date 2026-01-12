@@ -35,6 +35,7 @@ public class SecurityConfig {
   public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
     return http
         .csrf(csrf -> csrf.disable())
+        .cors(cors -> {})
         .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
         .exceptionHandling(eh -> eh
             .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
@@ -42,23 +43,21 @@ public class SecurityConfig {
         )
         .authenticationProvider(daoAuthProvider())
         .authorizeHttpRequests(auth -> auth
+            // allow Spring's error dispatch
             .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
             .requestMatchers("/error").permitAll()
 
-            // ✅ allow auth endpoints (yours is /api/auth/login)
-            .requestMatchers("/api/auth/**").permitAll()
-            .requestMatchers("/auth/**").permitAll()
+            .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
 
+            // public endpoints
+            .requestMatchers("/auth/**").permitAll()
             .requestMatchers("/actuator/health", "/actuator/info").permitAll()
 
-            // Admin-only deletes for projects
-            .requestMatchers(HttpMethod.DELETE, "/api/projects/**").authenticated()
+            // everything under /api requires auth
+            .requestMatchers("/api/**").authenticated()
 
-
-            // Admin area
-            .requestMatchers("/api/admin/**").hasRole("ADMIN")
-
-            .anyRequest().authenticated()
+            // lock down anything else
+            .anyRequest().denyAll()
         )
         .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
         .build();
