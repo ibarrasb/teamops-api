@@ -1,10 +1,10 @@
 # teamops-api
 
-Spring Boot (3.5.x) + Java 25 backend for TeamOps.  
+Spring Boot (3.5.x) + Java 21 backend for TeamOps.  
 JWT auth, Projects + Tasks CRUD, Flyway migrations, Postgres + Redis (local via Docker Compose).
 
 ## Requirements
-- Java 25
+- Java 21
 - Docker + Docker Compose
 
 ## Local dev (recommended)
