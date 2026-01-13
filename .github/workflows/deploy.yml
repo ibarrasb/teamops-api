@@ -1,11 +1,10 @@
-name: Deploy TeamOps API (EC2)
+name: Deploy TeamOps API (EC2 via SSM)
 
 on:
   push:
     branches: ["main"]
   workflow_dispatch:
 
-# Needed for OIDC (no long-lived AWS keys)
 permissions:
   id-token: write
   contents: read
@@ -29,7 +28,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # OIDC -> Assume Role (no AWS keys)
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -62,95 +60,115 @@ jobs:
             --push \
             .
 
-      - name: Deploy on EC2 via SSH (pull + restart)
+      - name: Deploy on EC2 via SSM Run Command
         env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-
           AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
+          EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
           TAG: ${{ steps.vars.outputs.TAG }}
         run: |
           set -euo pipefail
 
-          # Write SSH key to runner
-          mkdir -p ~/.ssh
-          printf '%s' "$EC2_SSH_KEY" > ~/.ssh/teamops-key.pem
-          chmod 600 ~/.ssh/teamops-key.pem
+          IMAGE_TAGGED="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${REPO_NAME}:${TAG}"
 
-          # Remote deploy
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/teamops-key.pem "$EC2_USER@$EC2_HOST" "bash -lc '
-            set -euo pipefail
+          # Build the remote deploy script (runs on the EC2 instance)
+          cat > deploy.sh <<EOF
+          set -euo pipefail
 
-            AWS_REGION=\"${AWS_REGION}\"
-            AWS_ACCOUNT_ID=\"${AWS_ACCOUNT_ID}\"
-            REPO_NAME=\"${REPO_NAME}\"
-            TAG=\"${TAG}\"
-            PARAM_PREFIX=\"${PARAM_PREFIX}\"
-            CONTAINER_NAME=\"${CONTAINER_NAME}\"
-            REDIS_CONTAINER=\"${REDIS_CONTAINER}\"
-            DOCKER_NET=\"${DOCKER_NET}\"
+          AWS_REGION="${AWS_REGION}"
+          AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID}"
+          REPO_NAME="${REPO_NAME}"
+          TAG="${TAG}"
+          PARAM_PREFIX="${PARAM_PREFIX}"
+          CONTAINER_NAME="${CONTAINER_NAME}"
+          REDIS_CONTAINER="${REDIS_CONTAINER}"
+          DOCKER_NET="${DOCKER_NET}"
+          IMAGE_TAGGED="${IMAGE_TAGGED}"
 
-            IMAGE_TAGGED=\"${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${REPO_NAME}:${TAG}\"
+          echo "== Login to ECR (using EC2 instance role) =="
+          aws ecr get-login-password --region "\$AWS_REGION" \
+            | docker login --username AWS --password-stdin \
+              "\$AWS_ACCOUNT_ID.dkr.ecr.\$AWS_REGION.amazonaws.com"
 
-            echo \"== Login to ECR (using EC2 instance role) ==\"
-            aws ecr get-login-password --region \"${AWS_REGION}\" \
-              | docker login --username AWS --password-stdin \
-                \"${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com\"
+          echo "== Pull image: \$IMAGE_TAGGED =="
+          docker pull "\$IMAGE_TAGGED"
 
-            echo \"== Pull image: \$IMAGE_TAGGED ==\"
-            docker pull \"\$IMAGE_TAGGED\"
+          echo "== Ensure Docker network =="
+          docker network create "\$DOCKER_NET" 2>/dev/null || true
 
-            echo \"== Ensure Docker network ==\"
-            docker network create \"\$DOCKER_NET\" 2>/dev/null || true
+          echo "== Start/ensure Redis =="
+          if docker ps -a --format '{{.Names}}' | grep -q "^\$REDIS_CONTAINER\$"; then
+            docker start "\$REDIS_CONTAINER" >/dev/null || true
+          else
+            docker run -d --name "\$REDIS_CONTAINER" --restart unless-stopped \
+              --network "\$DOCKER_NET" \
+              redis:7-alpine
+          fi
 
-            echo \"== Start/ensure Redis ==\"
-            if docker ps -a --format \"{{.Names}}\" | grep -q \"^${REDIS_CONTAINER}\$\"; then
-              docker start \"\$REDIS_CONTAINER\" >/dev/null || true
-            else
-              docker run -d --name \"\$REDIS_CONTAINER\" --restart unless-stopped \
-                --network \"\$DOCKER_NET\" \
-                redis:7-alpine
+          echo "== Fetch secrets from SSM =="
+          DB_URL=\$(aws ssm get-parameter --region "\$AWS_REGION" --name "\$PARAM_PREFIX/DB_URL" --query Parameter.Value --output text)
+          DB_USER=\$(aws ssm get-parameter --region "\$AWS_REGION" --name "\$PARAM_PREFIX/DB_USER" --query Parameter.Value --output text)
+          DB_PASS=\$(aws ssm get-parameter --region "\$AWS_REGION" --with-decryption --name "\$PARAM_PREFIX/DB_PASS" --query Parameter.Value --output text)
+          JWT_SECRET=\$(aws ssm get-parameter --region "\$AWS_REGION" --with-decryption --name "\$PARAM_PREFIX/JWT_SECRET" --query Parameter.Value --output text)
+
+          echo "== Restart API container =="
+          docker rm -f "\$CONTAINER_NAME" 2>/dev/null || true
+          docker run -d --name "\$CONTAINER_NAME" --restart unless-stopped \
+            --network "\$DOCKER_NET" \
+            -p 80:8080 \
+            -e SPRING_PROFILES_ACTIVE=prod \
+            -e SERVER_PORT=8080 \
+            -e SPRING_DATASOURCE_URL="\$DB_URL" \
+            -e SPRING_DATASOURCE_USERNAME="\$DB_USER" \
+            -e SPRING_DATASOURCE_PASSWORD="\$DB_PASS" \
+            -e JWT_SECRET="\$JWT_SECRET" \
+            -e REDIS_HOST="\$REDIS_CONTAINER" \
+            -e REDIS_PORT="6379" \
+            "\$IMAGE_TAGGED"
+
+          echo "== Containers =="
+          docker ps --filter "name=teamops-"
+
+          echo "== Health check (retry up to ~60s) =="
+          for i in \$(seq 1 30); do
+            code=\$(curl -s -o /dev/null -w "%{http_code}" http://localhost:80/actuator/health || true)
+            if [ "\$code" = "200" ]; then
+              echo "✅ Health OK"
+              curl -s http://localhost:80/actuator/health; echo
+              exit 0
             fi
+            echo "Waiting... (\$i/30) http=\$code"
+            sleep 2
+          done
 
-            echo \"== Fetch secrets from SSM (EC2 role must allow GetParameter) ==\"
-            DB_URL=\$(aws ssm get-parameter --region \"${AWS_REGION}\" --name \"${PARAM_PREFIX}/DB_URL\" --query Parameter.Value --output text)
-            DB_USER=\$(aws ssm get-parameter --region \"${AWS_REGION}\" --name \"${PARAM_PREFIX}/DB_USER\" --query Parameter.Value --output text)
-            DB_PASS=\$(aws ssm get-parameter --region \"${AWS_REGION}\" --with-decryption --name \"${PARAM_PREFIX}/DB_PASS\" --query Parameter.Value --output text)
-            JWT_SECRET=\$(aws ssm get-parameter --region \"${AWS_REGION}\" --with-decryption --name \"${PARAM_PREFIX}/JWT_SECRET\" --query Parameter.Value --output text)
+          echo "❌ Health never reached 200. Last logs:"
+          docker logs --tail 200 "\$CONTAINER_NAME" || true
+          exit 1
+          EOF
 
-            echo \"== Restart API container ==\"
-            docker rm -f \"\$CONTAINER_NAME\" 2>/dev/null || true
-            docker run -d --name \"\$CONTAINER_NAME\" --restart unless-stopped \
-              --network \"\$DOCKER_NET\" \
-              -p 80:8080 \
-              -e SPRING_PROFILES_ACTIVE=prod \
-              -e SERVER_PORT=8080 \
-              -e SPRING_DATASOURCE_URL=\"\$DB_URL\" \
-              -e SPRING_DATASOURCE_USERNAME=\"\$DB_USER\" \
-              -e SPRING_DATASOURCE_PASSWORD=\"\$DB_PASS\" \
-              -e JWT_SECRET=\"\$JWT_SECRET\" \
-              -e REDIS_HOST=\"\$REDIS_CONTAINER\" \
-              -e REDIS_PORT=\"6379\" \
-              \"\$IMAGE_TAGGED\"
+          PARAMS=$(jq -n --rawfile cmd deploy.sh '{commands:[$cmd]}')
 
-            echo \"== Containers ==\"
-            docker ps --filter \"name=teamops-\"
+          echo "== Sending SSM command to instance: $EC2_INSTANCE_ID =="
+          CMD_ID=$(aws ssm send-command \
+            --region "$AWS_REGION" \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy teamops-api ${TAG}" \
+            --parameters "$PARAMS" \
+            --query "Command.CommandId" --output text)
 
-            echo \"== Health check (retry up to ~60s) ==\"
-            for i in \$(seq 1 30); do
-              code=\$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:80/actuator/health || true)
-              if [ \"\$code\" = \"200\" ]; then
-                echo \"✅ Health OK\"
-                curl -s http://localhost:80/actuator/health; echo
-                exit 0
-              fi
-              echo \"Waiting... (\$i/30) http=\$code\"
-              sleep 2
-            done
+          echo "CommandId=$CMD_ID"
+          aws ssm wait command-executed --region "$AWS_REGION" --command-id "$CMD_ID" --instance-id "$EC2_INSTANCE_ID"
 
-            echo \"❌ Health never reached 200. Last logs:\"
-            docker logs --tail 200 \"\$CONTAINER_NAME\" || true
+          STATUS=$(aws ssm get-command-invocation --region "$AWS_REGION" --command-id "$CMD_ID" --instance-id "$EC2_INSTANCE_ID" --query Status --output text)
+          echo "SSM Status: $STATUS"
+
+          # Print output (useful when it fails)
+          aws ssm get-command-invocation --region "$AWS_REGION" --command-id "$CMD_ID" --instance-id "$EC2_INSTANCE_ID" \
+            --query StandardOutputContent --output text || true
+
+          if [ "$STATUS" != "Success" ]; then
+            aws ssm get-command-invocation --region "$AWS_REGION" --command-id "$CMD_ID" --instance-id "$EC2_INSTANCE_ID" \
+              --query StandardErrorContent --output text || true
             exit 1
-          '"
+          fi
