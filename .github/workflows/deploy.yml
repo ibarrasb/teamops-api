@@ -5,7 +5,7 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
-# Needed for OIDC
+# Needed for OIDC (no long-lived AWS keys)
 permissions:
   id-token: write
   contents: read
@@ -29,6 +29,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # OIDC -> Assume Role (no AWS keys)
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -53,6 +54,7 @@ jobs:
         run: |
           set -e
           IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME"
+
           docker buildx build \
             --platform linux/amd64 \
             -t "$IMAGE:$TAG" \
@@ -77,7 +79,7 @@ jobs:
           printf '%s' "$EC2_SSH_KEY" > ~/.ssh/teamops-key.pem
           chmod 600 ~/.ssh/teamops-key.pem
 
-          # Remote deploy (NO heredoc in YAML)
+          # Remote deploy
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/teamops-key.pem "$EC2_USER@$EC2_HOST" "bash -lc '
             set -euo pipefail
 
@@ -90,7 +92,6 @@ jobs:
             REDIS_CONTAINER=\"${REDIS_CONTAINER}\"
             DOCKER_NET=\"${DOCKER_NET}\"
 
-            IMAGE_REPO=\"${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${REPO_NAME}\"
             IMAGE_TAGGED=\"${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${REPO_NAME}:${TAG}\"
 
             echo \"== Login to ECR (using EC2 instance role) ==\"
@@ -98,58 +99,58 @@ jobs:
               | docker login --username AWS --password-stdin \
                 \"${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com\"
 
-            echo \"== Pull image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${REPO_NAME}:${TAG} ==\"
-            docker pull \"$IMAGE_TAGGED\"
+            echo \"== Pull image: \$IMAGE_TAGGED ==\"
+            docker pull \"\$IMAGE_TAGGED\"
 
             echo \"== Ensure Docker network ==\"
-            docker network create \"$DOCKER_NET\" 2>/dev/null || true
+            docker network create \"\$DOCKER_NET\" 2>/dev/null || true
 
             echo \"== Start/ensure Redis ==\"
             if docker ps -a --format \"{{.Names}}\" | grep -q \"^${REDIS_CONTAINER}\$\"; then
-              docker start \"$REDIS_CONTAINER\" >/dev/null || true
+              docker start \"\$REDIS_CONTAINER\" >/dev/null || true
             else
-              docker run -d --name \"$REDIS_CONTAINER\" --restart unless-stopped \
-                --network \"$DOCKER_NET\" \
+              docker run -d --name \"\$REDIS_CONTAINER\" --restart unless-stopped \
+                --network \"\$DOCKER_NET\" \
                 redis:7-alpine
             fi
 
-            echo \"== Fetch secrets from SSM ==\"
-            DB_URL=$(aws ssm get-parameter --region \"${AWS_REGION}\" --name \"${PARAM_PREFIX}/DB_URL\" --query Parameter.Value --output text)
-            DB_USER=$(aws ssm get-parameter --region \"${AWS_REGION}\" --name \"${PARAM_PREFIX}/DB_USER\" --query Parameter.Value --output text)
-            DB_PASS=$(aws ssm get-parameter --region \"${AWS_REGION}\" --with-decryption --name \"${PARAM_PREFIX}/DB_PASS\" --query Parameter.Value --output text)
-            JWT_SECRET=$(aws ssm get-parameter --region \"${AWS_REGION}\" --with-decryption --name \"${PARAM_PREFIX}/JWT_SECRET\" --query Parameter.Value --output text)
+            echo \"== Fetch secrets from SSM (EC2 role must allow GetParameter) ==\"
+            DB_URL=\$(aws ssm get-parameter --region \"${AWS_REGION}\" --name \"${PARAM_PREFIX}/DB_URL\" --query Parameter.Value --output text)
+            DB_USER=\$(aws ssm get-parameter --region \"${AWS_REGION}\" --name \"${PARAM_PREFIX}/DB_USER\" --query Parameter.Value --output text)
+            DB_PASS=\$(aws ssm get-parameter --region \"${AWS_REGION}\" --with-decryption --name \"${PARAM_PREFIX}/DB_PASS\" --query Parameter.Value --output text)
+            JWT_SECRET=\$(aws ssm get-parameter --region \"${AWS_REGION}\" --with-decryption --name \"${PARAM_PREFIX}/JWT_SECRET\" --query Parameter.Value --output text)
 
             echo \"== Restart API container ==\"
-            docker rm -f \"$CONTAINER_NAME\" 2>/dev/null || true
-            docker run -d --name \"$CONTAINER_NAME\" --restart unless-stopped \
-              --network \"$DOCKER_NET\" \
+            docker rm -f \"\$CONTAINER_NAME\" 2>/dev/null || true
+            docker run -d --name \"\$CONTAINER_NAME\" --restart unless-stopped \
+              --network \"\$DOCKER_NET\" \
               -p 80:8080 \
               -e SPRING_PROFILES_ACTIVE=prod \
               -e SERVER_PORT=8080 \
-              -e SPRING_DATASOURCE_URL=\"$DB_URL\" \
-              -e SPRING_DATASOURCE_USERNAME=\"$DB_USER\" \
-              -e SPRING_DATASOURCE_PASSWORD=\"$DB_PASS\" \
-              -e JWT_SECRET=\"$JWT_SECRET\" \
-              -e REDIS_HOST=\"$REDIS_CONTAINER\" \
+              -e SPRING_DATASOURCE_URL=\"\$DB_URL\" \
+              -e SPRING_DATASOURCE_USERNAME=\"\$DB_USER\" \
+              -e SPRING_DATASOURCE_PASSWORD=\"\$DB_PASS\" \
+              -e JWT_SECRET=\"\$JWT_SECRET\" \
+              -e REDIS_HOST=\"\$REDIS_CONTAINER\" \
               -e REDIS_PORT=\"6379\" \
-              \"$IMAGE_TAGGED\"
+              \"\$IMAGE_TAGGED\"
 
             echo \"== Containers ==\"
             docker ps --filter \"name=teamops-\"
 
             echo \"== Health check (retry up to ~60s) ==\"
-            for i in $(seq 1 30); do
-              code=$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:80/actuator/health || true)
-              if [ \"$code\" = \"200\" ]; then
+            for i in \$(seq 1 30); do
+              code=\$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:80/actuator/health || true)
+              if [ \"\$code\" = \"200\" ]; then
                 echo \"✅ Health OK\"
                 curl -s http://localhost:80/actuator/health; echo
                 exit 0
               fi
-              echo \"Waiting... ($i/30) http=$code\"
+              echo \"Waiting... (\$i/30) http=\$code\"
               sleep 2
             done
 
             echo \"❌ Health never reached 200. Last logs:\"
-            docker logs --tail 120 \"$CONTAINER_NAME\" || true
+            docker logs --tail 200 \"\$CONTAINER_NAME\" || true
             exit 1
           '"
