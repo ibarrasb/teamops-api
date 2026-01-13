@@ -1,29 +1,24 @@
 # ---- build stage ----
-    FROM eclipse-temurin:21-jdk AS build
+    FROM maven:3.9-eclipse-temurin-21 AS build
     WORKDIR /app
     
-    # Better caching: deps layer
+    # Cache deps first (faster rebuilds)
     COPY pom.xml ./
-    COPY .mvn .mvn
-    COPY mvnw ./
-    RUN ./mvnw -q -DskipTests dependency:go-offline
+    RUN mvn -q -DskipTests dependency:go-offline
     
-    # Now copy source and build
-    COPY src src
-    RUN ./mvnw -q -DskipTests clean package
+    # Build
+    COPY src ./src
+    RUN mvn -q -DskipTests package
     
     # ---- runtime stage ----
     FROM eclipse-temurin:21-jre
     WORKDIR /app
     
-    # Non-root user (fixed uid)
-    RUN useradd -m -u 10001 appuser
-    USER appuser
+    # Copy the built jar (reliable across versions)
+    COPY --from=build /app/target/*.jar /app/app.jar
     
-    # Copy only the runnable jar (not *.jar.original)
-    COPY --from=build /app/target/*SNAPSHOT.jar /app/app.jar
-    
-    ENV JAVA_OPTS=""
     EXPOSE 8080
-    ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]
+    ENV SERVER_PORT=8080
+    
+    ENTRYPOINT ["java","-jar","/app/app.jar"]
     
